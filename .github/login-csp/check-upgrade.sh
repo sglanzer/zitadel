@@ -44,7 +44,7 @@ if [[ $mode == dependencies ]]; then
   status=0
   pnpm --filter '@zitadel/login...' outdated --format json > "$reports/dependencies.json" || status=$?
   [[ $status == 0 || $status == 1 ]]
-  pnpm --filter '@zitadel/login...' update --latest --network-concurrency 4 --config.child-concurrency=2
+  pnpm --filter '@zitadel/login...' update --latest --network-concurrency 4 --config.child-concurrency=2 --config.store-dir="$workspace/pnpm-store"
   git diff -- apps/login/package.json packages/client/package.json packages/proto/package.json pnpm-lock.yaml > "$reports/dependency-update.patch"
   bound
 fi

@@ -26,7 +26,7 @@ export GOMAXPROCS=2 GOMEMLIMIT=1500MiB GOPATH="$workspace/go" GOCACHE="$workspac
 export NODE_OPTIONS=--max-old-space-size=2048 NX_DAEMON=false NX_NO_CLOUD=true NEXT_TELEMETRY_DISABLED=1 NX_PARALLEL=2
 ref=v4.19.2
 if [[ $mode == release ]]; then
-  ref=$(curl --max-time 30 -fsSL https://api.github.com/repos/zitadel/zitadel/releases/latest | python3 -c 'import json,sys;print(json.load(sys.stdin)["tag_name"])')
+  ref=$(curl --max-time 30 -fsSI https://github.com/zitadel/zitadel/releases/latest | python3 -c 'import sys;from urllib.parse import urlsplit;u=urlsplit(next(x.split(":",1)[1].strip() for x in sys.stdin if x.lower().startswith("location:")));assert u.netloc=="github.com" and u.path.startswith("/zitadel/zitadel/releases/tag/");print(u.path.rsplit("/",1)[1])')
 fi
 [[ $ref =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 printf 'mode=%s\nsource=%s\nbackend remains v4.19.2; candidate only, never automatic deployment\n' "$mode" "$ref" > "$reports/candidate.txt"

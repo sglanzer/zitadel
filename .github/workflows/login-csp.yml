@@ -9,7 +9,7 @@ on:
         type: choice
         options: [check, patch-failure, test-failure, publish-tested-image]
         default: check
-      artifact_tag:
+      artifact_run:
         type: string
       artifact_sha256:
         type: string
@@ -72,23 +72,24 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
       packages: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Publish only the supplied, tested OCI archive
         env:
           GH_TOKEN: ${{ github.token }}
-          ARTIFACT_TAG: ${{ inputs.artifact_tag }}
+          ARTIFACT_RUN: ${{ inputs.artifact_run }}
           ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
         run: |
           set -euo pipefail
-          [[ "$ARTIFACT_TAG" == novis-login-csp-v4.19.2 ]]
+          [[ "$ARTIFACT_RUN" =~ ^[0-9]+$ ]]
           [[ "$ARTIFACT_SHA256" =~ ^[a-f0-9]{64}$ ]]
           umask 077
           printf '%s' "$GH_TOKEN" > "$RUNNER_TEMP/publisher-token"
           trap 'rm -f "$RUNNER_TEMP/publisher-token"' EXIT
           sudo systemd-run --wait --pipe --unit login-csp-publish -p RuntimeMaxSec=540 -p CPUQuota=100% -p MemoryMax=1G -p KillMode=control-group \
             -p "Environment=LOGIN_CSP_PUBLISH_ROOT=$RUNNER_TEMP" -p "Environment=LOGIN_CSP_ARTIFACT_SHA256=$ARTIFACT_SHA256" \
-            -p "Environment=LOGIN_CSP_PUBLISH_ACTOR=$GITHUB_ACTOR" \
+            -p "Environment=LOGIN_CSP_PUBLISH_ACTOR=$GITHUB_ACTOR" -p "Environment=LOGIN_CSP_ARTIFACT_RUN=$ARTIFACT_RUN" \
             /bin/bash "$GITHUB_WORKSPACE/.github/login-csp/publish.sh"
           echo 'Tested image published; no runtime deployment occurred.' >> "$GITHUB_STEP_SUMMARY"

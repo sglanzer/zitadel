@@ -54,6 +54,12 @@ jobs:
           name: login-csp-${{ matrix.source }}-${{ inputs.mode || 'check' }}
           path: login-csp-reports/
           retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: success()
+        with:
+          name: login-csp-image-${{ matrix.source }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/login-csp-build/candidate.oci.tar
+          retention-days: 7
   publish:
     if: inputs.mode == 'publish-tested-image'
     runs-on: ubuntu-24.04

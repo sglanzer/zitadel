@@ -1,0 +1,293 @@
+From 4d5a5ab77a31818565c1ba9fe3be293fe91636ef Mon Sep 17 00:00:00 2001
+From: Steven Glanzer <sglanzer@cisco.com>
+Date: Wed, 7 Oct 2026 11:22:55 -0400
+Subject: [PATCH] feat(login): support opt-in strict script CSP with
+ per-response nonces
+
+---
+ apps/login/.env                              |  5 ++
+ apps/login/src/app/{(login) => }/layout.tsx  |  6 +-
+ apps/login/src/components/theme-provider.tsx |  4 +-
+ apps/login/src/lib/csp.test.ts               | 16 +++++
+ apps/login/src/lib/csp.ts                    | 13 ++++
+ apps/login/src/proxy.test.ts                 | 73 ++++++++++++++++++++
+ apps/login/src/proxy.ts                      | 24 ++++++-
+ 7 files changed, 135 insertions(+), 6 deletions(-)
+ rename apps/login/src/app/{(login) => }/layout.tsx (93%)
+ create mode 100644 apps/login/src/proxy.test.ts
+
+diff --git a/apps/login/.env b/apps/login/.env
+index c8b7259..79c1217 100644
+--- a/apps/login/.env
++++ b/apps/login/.env
+@@ -3,6 +3,11 @@ EMAIL_VERIFICATION=false
+ ZITADEL_API_URL=http://localhost:8080
+ ZITADEL_SERVICE_USER_TOKEN_FILE=../../login-client.pat
+ 
++# Opt in to a fresh server-generated script nonce and strict-dynamic CSP.
++# Nonce HTML is rendered per request and private/no-store. Supplied branding,
++# custom fonts and component styles retain style-src 'unsafe-inline' only.
++# CSP_NONCE_ENABLED=true
++
+ # Whether ui_locales from OAuth requests should always override the language cookie.
+ # When set to "true", the language from ui_locales will always be used.
+ # When unset or set to "false", ui_locales only sets the language if no cookie exists (preserves user's manual selection).
+diff --git a/apps/login/src/app/(login)/layout.tsx b/apps/login/src/app/layout.tsx
+similarity index 93%
+rename from apps/login/src/app/(login)/layout.tsx
+rename to apps/login/src/app/layout.tsx
+index aee7c1d..7fc4084 100644
+--- a/apps/login/src/app/(login)/layout.tsx
++++ b/apps/login/src/app/layout.tsx
+@@ -21,6 +21,9 @@ const lato = Lato({
+   subsets: ["latin"],
+ });
+ 
++// Per-response nonces cannot be used with prerendered or shared cached HTML.
++export const dynamic = "force-dynamic";
++
+ export async function generateMetadata(): Promise<Metadata> {
+   const t = await getTranslations("common");
+   return { title: t("title") };
+@@ -28,6 +31,7 @@ export async function generateMetadata(): Promise<Metadata> {
+ 
+ export default async function RootLayout({ children }: { children: React.ReactNode }) {
+   const _headers = await headers();
++  const nonce = _headers.get("x-zitadel-csp-nonce") ?? undefined;
+   const { serviceConfig } = getServiceConfig(_headers);
+ 
+   let languages = LANGS;
+@@ -46,7 +50,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
+     <html className={`${lato.className}`} suppressHydrationWarning>
+       <head />
+       <body>
+-        <ThemeProvider>
++        <ThemeProvider nonce={nonce}>
+           <Tooltip.Provider>
+             <Suspense
+               fallback={
+diff --git a/apps/login/src/components/theme-provider.tsx b/apps/login/src/components/theme-provider.tsx
+index 9ae817f..f91b75e 100644
+--- a/apps/login/src/components/theme-provider.tsx
++++ b/apps/login/src/components/theme-provider.tsx
+@@ -2,9 +2,9 @@
+ import { ThemeProvider as ThemeP } from "next-themes";
+ import { ReactNode } from "react";
+ 
+-export function ThemeProvider({ children }: { children: ReactNode }) {
++export function ThemeProvider({ children, nonce }: { children: ReactNode; nonce?: string }) {
+   return (
+-    <ThemeP attribute="class" defaultTheme="system" storageKey="cp-theme" value={{ dark: "dark" }}>
++    <ThemeP nonce={nonce} attribute="class" defaultTheme="system" storageKey="cp-theme" value={{ dark: "dark" }}>
+       {children}
+     </ThemeP>
+   );
+diff --git a/apps/login/src/lib/csp.test.ts b/apps/login/src/lib/csp.test.ts
+index 43553bb..b747fd7 100644
+--- a/apps/login/src/lib/csp.test.ts
++++ b/apps/login/src/lib/csp.test.ts
+@@ -2,6 +2,22 @@ import { describe, expect, test } from "vitest";
+ import { buildCSP } from "./csp";
+ 
+ describe("buildCSP", () => {
++  test("nonce policy admits only trusted scripts and preserves supplied styles and iframe settings", () => {
++    const nonce = "AAECAwQFBgcICQoLDA0ODw==";
++    const csp = buildCSP({ nonce, iframeOrigins: ["https://portal.example.com"] });
++    const scripts = csp.split("; ").find((directive) => directive.startsWith("script-src "));
++    expect(scripts).toBe(`script-src 'nonce-${nonce}' 'strict-dynamic'`);
++    expect(csp).toContain("script-src-attr 'none'");
++    expect(csp).toContain("base-uri 'none'");
++    expect(csp).toContain("style-src 'self' 'unsafe-inline'");
++    expect(csp).toContain("frame-ancestors https://portal.example.com");
++  });
++
++  test.each(["caller-nonce", "'unsafe-inline'", "AAECAwQFBgcICQoLDA0ODw==; script-src *"])(
++    "rejects an invalid nonce: %s",
++    (nonce) => expect(() => buildCSP({ nonce })).toThrow("Invalid CSP nonce"),
++  );
++
+   test("returns all base directives with safe defaults", () => {
+     const csp = buildCSP();
+ 
+diff --git a/apps/login/src/lib/csp.ts b/apps/login/src/lib/csp.ts
+index 439eaf8..a3a1981 100644
+--- a/apps/login/src/lib/csp.ts
++++ b/apps/login/src/lib/csp.ts
+@@ -12,11 +12,24 @@ const BASE_DIRECTIVES: Record<string, string[]> = {
+ export interface CSPOptions {
+   serviceUrl?: string;
+   iframeOrigins?: string[] | null;
++  nonce?: string;
+ }
+ 
+ export function buildCSP(options: CSPOptions = {}): string {
+   const directives: Record<string, string[]> = { ...BASE_DIRECTIVES };
+ 
++  if (options.nonce) {
++    // Only accept the base64 encoding produced by the server's CSPRNG.
++    if (!/^[A-Za-z0-9+/]{22}==$/.test(options.nonce)) {
++      throw new Error("Invalid CSP nonce");
++    }
++    directives["script-src"] = [`'nonce-${options.nonce}'`, "'strict-dynamic'"];
++    directives["script-src-attr"] = ["'none'"];
++    directives["base-uri"] = ["'none'"];
++    // Supplied branding, Radix and theme components require inline styles.
++    // This exception is limited to styles, never executable scripts.
++  }
++
+   if (options.serviceUrl) {
+     directives["img-src"] = [...directives["img-src"], options.serviceUrl];
+     directives["font-src"] = [...directives["font-src"], options.serviceUrl];
+diff --git a/apps/login/src/proxy.test.ts b/apps/login/src/proxy.test.ts
+new file mode 100644
+index 0000000..9e4f727
+--- /dev/null
++++ b/apps/login/src/proxy.test.ts
+@@ -0,0 +1,73 @@
++// @vitest-environment node
++import { NextRequest } from "next/server";
++import { afterEach, describe, expect, test, vi } from "vitest";
++
++vi.mock("./lib/service-url", () => ({
++  getServiceConfig: () => ({ serviceConfig: { baseUrl: "https://idp.example.com" } }),
++}));
++vi.mock("./lib/server/security-settings", () => ({
++  getIframeOrigins: vi.fn().mockResolvedValue(null),
++}));
++
++import { getIframeOrigins } from "./lib/server/security-settings";
++import { proxy } from "./proxy";
++
++afterEach(() => {
++  vi.unstubAllEnvs();
++  vi.mocked(getIframeOrigins).mockResolvedValue(null);
++});
++
++describe("strict Login CSP", () => {
++  test.each(["/_not-found", "/_global-error"])("does not expose a prerendered internal document: %s", async (path) => {
++    vi.stubEnv("CSP_NONCE_ENABLED", "true");
++    const response = await proxy(new NextRequest(`https://login.example.com${path}`));
++    expect(response.status).toBe(404);
++    expect(await response.text()).toBe("");
++    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
++  });
++
++  test("overwrites caller headers with fresh 128-bit server nonces and one uncached rendering policy", async () => {
++    vi.stubEnv("CSP_NONCE_ENABLED", "true");
++    vi.stubEnv("CSP_FETCH_ENABLED", "false");
++    const request = () =>
++      new NextRequest("https://login.example.com/loginname", {
++        headers: {
++          "x-zitadel-csp-nonce": "caller-selected",
++          "Content-Security-Policy": "script-src 'nonce-caller-selected'",
++          "Content-Security-Policy-Report-Only": "script-src 'nonce-caller-selected'",
++        },
++      });
++    const first = await proxy(request());
++    const second = await proxy(request());
++    const nonce = first.headers.get("x-middleware-request-x-zitadel-csp-nonce")!;
++    expect(Buffer.from(nonce, "base64")).toHaveLength(16);
++    expect(nonce).not.toBe("caller-selected");
++    expect(second.headers.get("x-middleware-request-x-zitadel-csp-nonce")).not.toBe(nonce);
++    const policy = first.headers.get("Content-Security-Policy")!;
++    expect(policy).toContain(`script-src 'nonce-${nonce}' 'strict-dynamic'`);
++    expect(first.headers.get("x-middleware-request-content-security-policy")).toBe(policy);
++    expect(first.headers.get("x-middleware-override-headers")).not.toContain("content-security-policy-report-only");
++    expect(first.headers.get("Cache-Control")).toBe("private, no-store");
++  });
++
++  test("strict policy also survives settings lookup failure", async () => {
++    vi.stubEnv("CSP_NONCE_ENABLED", "true");
++    vi.stubEnv("CSP_FETCH_ENABLED", "true");
++    vi.mocked(getIframeOrigins).mockRejectedValue(new Error("fixture unavailable"));
++    const response = await proxy(new NextRequest("https://login.example.com/password"));
++    expect(response.headers.get("Content-Security-Policy")).toContain("'strict-dynamic'");
++    expect(response.headers.get("X-Frame-Options")).toBe("deny");
++  });
++
++  test("legacy mode stays off by default and strips a spoofed theme nonce", async () => {
++    vi.stubEnv("CSP_NONCE_ENABLED", "false");
++    vi.stubEnv("CSP_FETCH_ENABLED", "false");
++    const response = await proxy(
++      new NextRequest("https://login.example.com/loginname", {
++        headers: { "x-zitadel-csp-nonce": "caller-selected" },
++      }),
++    );
++    expect(response.headers.get("Content-Security-Policy")).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval'");
++    expect(response.headers.get("x-middleware-request-x-zitadel-csp-nonce")).toBeNull();
++  });
++});
+diff --git a/apps/login/src/proxy.ts b/apps/login/src/proxy.ts
+index 6fa0576..8476909 100644
+--- a/apps/login/src/proxy.ts
++++ b/apps/login/src/proxy.ts
+@@ -1,4 +1,5 @@
+ import { NextRequest, NextResponse } from "next/server";
++import { randomBytes } from "node:crypto";
+ import { buildCSP } from "./lib/csp";
+ import { applyCustomHeaders } from "./lib/custom-headers";
+ import { createLogger } from "./lib/logger";
+@@ -14,6 +15,9 @@ export const config = {
+ export async function proxy(request: NextRequest) {
+   // Add the original URL as a header to all requests
+   const requestHeaders = new Headers(request.headers);
++  // A caller must never choose the nonce used by the rendering tree.
++  requestHeaders.delete("x-zitadel-csp-nonce");
++  const nonce = process.env.CSP_NONCE_ENABLED === "true" ? randomBytes(16).toString("base64") : undefined;
+ 
+   // Extract "organization" search param from the URL and set it as a header if available
+   const organization = request.nextUrl.searchParams.get("organization");
+@@ -29,6 +33,12 @@ export async function proxy(request: NextRequest) {
+     return NextResponse.next({ request: { headers: requestHeaders } });
+   }
+ 
++  // Next's synthetic fallback documents are prerendered without a request
++  // nonce. They are internal implementation paths, not supplied Login routes.
++  if (nonce && ["/_not-found", "/_global-error"].includes(request.nextUrl.pathname)) {
++    return new NextResponse(null, { status: 404, headers: { "Cache-Control": "private, no-store" } });
++  }
++
+   const { serviceConfig } = getServiceConfig(request.headers);
+   const { baseUrl, publicHost, instanceHost } = serviceConfig;
+ 
+@@ -42,7 +52,7 @@ export async function proxy(request: NextRequest) {
+     try {
+       const iframeOrigins = await getIframeOrigins(baseUrl, instanceHost, publicHost);
+ 
+-      responseHeaders.set("Content-Security-Policy", buildCSP({ serviceUrl: baseUrl, iframeOrigins }));
++      responseHeaders.set("Content-Security-Policy", buildCSP({ serviceUrl: baseUrl, iframeOrigins, nonce }));
+ 
+       if (!iframeOrigins) {
+         responseHeaders.set("X-Frame-Options", "deny");
+@@ -51,11 +61,11 @@ export async function proxy(request: NextRequest) {
+       logger.error("Failed to load security settings for CSP, using default CSP", {
+         error: err instanceof Error ? err.message : String(err),
+       });
+-      responseHeaders.set("Content-Security-Policy", buildCSP({ serviceUrl: baseUrl }));
++      responseHeaders.set("Content-Security-Policy", buildCSP({ serviceUrl: baseUrl, nonce }));
+       responseHeaders.set("X-Frame-Options", "deny");
+     }
+   } else {
+-    responseHeaders.set("Content-Security-Policy", buildCSP({ serviceUrl: baseUrl }));
++    responseHeaders.set("Content-Security-Policy", buildCSP({ serviceUrl: baseUrl, nonce }));
+     responseHeaders.set("X-Frame-Options", "deny");
+   }
+ 
+@@ -64,6 +74,14 @@ export async function proxy(request: NextRequest) {
+   const isMatched = proxyPaths.some((prefix) => request.nextUrl.pathname.startsWith(prefix));
+ 
+   if (!isMatched) {
++    if (nonce) {
++      // Next reads this policy when noncing bootstrap, chunk and streamed
++      // scripts. Its middleware response policy must be identical.
++      requestHeaders.set("x-zitadel-csp-nonce", nonce);
++      requestHeaders.set("Content-Security-Policy", responseHeaders.get("Content-Security-Policy")!);
++      requestHeaders.delete("Content-Security-Policy-Report-Only");
++      responseHeaders.set("Cache-Control", "private, no-store");
++    }
+     return NextResponse.next({
+       request: { headers: requestHeaders },
+       headers: responseHeaders,
+-- 
+2.54.0 (Apple Git-157)
+

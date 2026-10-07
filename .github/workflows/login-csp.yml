@@ -1,0 +1,82 @@
+name: Scoped Login CSP maintenance
+on:
+  push:
+    branches: [codex/login-csp-maintenance]
+    paths: [.github/login-csp/**, .github/workflows/login-csp.yml]
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [check, patch-failure, test-failure, publish-tested-image]
+        default: check
+      artifact_tag:
+        type: string
+      artifact_sha256:
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: login-csp-${{ github.ref }}-${{ inputs.mode || 'check' }}
+  cancel-in-progress: false
+jobs:
+  check:
+    if: inputs.mode != 'publish-tested-image'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [pinned, release, dependencies]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: pnpm/action-setup@9fd676a19091d4595eefd76e4bd31c97133911f1 # v4.2.0
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.14.0
+      - name: Bound production rebuild, patch and browser checks
+        env:
+          FAILURE: ${{ inputs.mode == 'patch-failure' && 'patch' || inputs.mode == 'test-failure' && 'test' || '' }}
+        run: |
+          sudo systemd-run --wait --pipe --unit login-csp-check -p RuntimeMaxSec=1500 -p CPUQuota=200% -p MemoryMax=4G -p KillMode=control-group \
+            -p "Environment=PATH=$PATH" -p "Environment=LOGIN_CSP_FAILURE=$FAILURE" \
+            -p "Environment=LOGIN_CSP_MAINTENANCE=$GITHUB_WORKSPACE/.github/login-csp" \
+            -p "Environment=LOGIN_CSP_WORKSPACE=$RUNNER_TEMP/login-csp-build" \
+            -p "Environment=LOGIN_CSP_REPORTS=$GITHUB_WORKSPACE/login-csp-reports" \
+            /bin/bash "$GITHUB_WORKSPACE/.github/login-csp/check-upgrade.sh" '${{ matrix.source }}'
+      - name: Report failure and block the upgrade
+        if: failure()
+        run: echo 'Patch/build/CSP check failed; no image publication or profile deployment is authorized by this result.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: login-csp-${{ matrix.source }}-${{ inputs.mode || 'check' }}
+          path: login-csp-reports/
+          retention-days: 14
+  publish:
+    if: inputs.mode == 'publish-tested-image'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Publish only the supplied, tested OCI archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_TAG: ${{ inputs.artifact_tag }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_TAG" == novis-login-csp-v4.19.2 ]]
+          [[ "$ARTIFACT_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          umask 077
+          printf '%s' "$GH_TOKEN" > "$RUNNER_TEMP/publisher-token"
+          trap 'rm -f "$RUNNER_TEMP/publisher-token"' EXIT
+          sudo systemd-run --wait --pipe --unit login-csp-publish -p RuntimeMaxSec=540 -p CPUQuota=100% -p MemoryMax=1G -p KillMode=control-group \
+            -p "Environment=LOGIN_CSP_PUBLISH_ROOT=$RUNNER_TEMP" -p "Environment=LOGIN_CSP_ARTIFACT_SHA256=$ARTIFACT_SHA256" \
+            -p "Environment=LOGIN_CSP_PUBLISH_ACTOR=$GITHUB_ACTOR" \
+            /bin/bash "$GITHUB_WORKSPACE/.github/login-csp/publish.sh"
+          echo 'Tested image published; no runtime deployment occurred.' >> "$GITHUB_STEP_SUMMARY"

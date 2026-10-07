@@ -15,6 +15,7 @@ cleanup(){
   status=$?
   [[ -z ${server:-} ]] || kill "$server" 2>/dev/null || true
   [[ -z ${daemon:-} ]] || kill "$daemon" 2>/dev/null || true
+  [[ -z ${container:-} ]] || docker rm -f "$container" >/dev/null 2>&1 || true
   chmod 0644 "$reports"/* 2>/dev/null || true
   exit "$status"
 }
@@ -43,7 +44,7 @@ if [[ $mode == dependencies ]]; then
   status=0
   pnpm --filter '@zitadel/login...' outdated --format json > "$reports/dependencies.json" || status=$?
   [[ $status == 0 || $status == 1 ]]
-  pnpm --filter '@zitadel/login...' update --latest --network-concurrency 4 --child-concurrency 2
+  pnpm --filter '@zitadel/login...' update --latest --network-concurrency 4 --config.child-concurrency=2
   git diff -- apps/login/package.json packages/client/package.json packages/proto/package.json pnpm-lock.yaml > "$reports/dependency-update.patch"
   bound
 fi
@@ -71,4 +72,17 @@ daemon=$!
 for _ in {1..20}; do "$workspace/tools/bin/buildctl" --addr unix:///run/novis-login-check.sock debug workers >/dev/null 2>&1 && break; kill -0 "$daemon"; sleep 1; done
 "$workspace/tools/bin/buildctl" --addr unix:///run/novis-login-check.sock build --frontend dockerfile.v0 --local context=apps/login --local dockerfile=apps/login --opt filename=Dockerfile.csp --output type=oci,name=ghcr.io/sglanzer/zitadel-login-csp:candidate,dest="$workspace/candidate.oci.tar" --metadata-file "$reports/image-digest.json"
 bound
+apt-get update -q
+DEBIAN_FRONTEND=noninteractive apt-get install -y -q skopeo
+skopeo --version > "$reports/image-tools.txt"
+skopeo copy "oci-archive:$workspace/candidate.oci.tar" docker-daemon:novis-login-csp:candidate
+container=novis-login-csp-proof
+# The daemon's bounded image-import overhead is separate operator work. The
+# actual image process has explicit CPU, RAM and PID limits, no real token.
+docker run -d --name "$container" --user 1000 --cpus=1 --memory=512m --pids-limit=256 --network=host \
+  -e CSP_NONCE_ENABLED=true -e PORT=13000 -e HOSTNAME=127.0.0.1 -e ZITADEL_API_URL=http://127.0.0.1:9 \
+  -e ZITADEL_SERVICE_USER_TOKEN=synthetic-noncredential -e OTEL_SDK_DISABLED=true novis-login-csp:candidate
+for _ in {1..30}; do curl -fsS --max-time 2 http://127.0.0.1:13000/ui/v2/login/healthy >/dev/null && break; sleep 1; done
+LOGIN_CSP_PACKAGE_JSON="$workspace/browser/package.json" LOGIN_CSP_BASE=http://127.0.0.1:13000 node "$maint/login-csp.mjs" > "$reports/image-browser.txt" 2>&1
+docker rm -f "$container" >/dev/null; container=
 printf 'CSP and production checks passed. Candidate digest requires configured private-stack Go/human e2e and review before a profile update. No deployment occurred.\n' >> "$reports/candidate.txt"

@@ -3,4 +3,5 @@ FROM ghcr.io/zitadel/zitadel-login:v4.19.2@sha256:ee98f024ddbebce788a7faf5a4b557
 USER root
 RUN rm -rf /app && mkdir /app && chown 1001:1001 /app
 COPY --chown=1001:1001 .next/standalone/ /app/
+RUN chmod -R a+rX /app && chmod 0555 /app/entrypoint.sh
 USER 1001

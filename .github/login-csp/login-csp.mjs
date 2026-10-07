@@ -54,6 +54,7 @@ async function document(path, spoof = false) {
   const scripts = headers['content-security-policy'].split(';').find(s => s.trim().startsWith('script-src '));
   assert(scripts.includes("'strict-dynamic'") && !scripts.includes('unsafe-'));
   const body = await response.text();
+  result.staticChunk ||= body.match(/<script[^>]+src="([^"]*\/_next\/static\/[^"]+)"/)?.[1];
   assert(Buffer.byteLength(body) <= 1 << 20);
   const tags = [...body.matchAll(/<script\b([^>]*)>/g)];
   assert(tags.length > 0 && tags.every(t => t[1].includes(`nonce="${nonce}"`)));
@@ -109,6 +110,21 @@ try {
   const first = await document('/ui/v2/login/logout/done');
   const second = await document('/ui/v2/login/logout/done', true); assert.notEqual(first, second);
   await document('/ui/v2/login/unknown-csp-fixture');
+  const cachePage = await context.newPage();
+  await cachePage.goto(base + '/ui/v2/login/logout/done', { waitUntil: 'networkidle' });
+  result.assets = await cachePage.evaluate(async paths => {
+    const rows = [];
+    for (const path of paths) {
+      const response = await fetch(path, { redirect: 'error' });
+      rows.push({ path, status: response.status, type: response.headers.get('content-type'), cache: response.headers.get('cache-control') });
+    }
+    return rows;
+  }, [result.staticChunk, '/ui/v2/login/grid-light.svg']);
+  assert(result.assets.every(a => a.status === 200 && !/private|no-store/.test(a.cache || '')));
+  await cachePage.close();
+  await document('/ui/v2/login/favicon/owned-missing.svg');
+  await document('/ui/v2/login/_next/static/owned-missing.js');
+
   result.negative = await controls(page, await page.evaluate(() => document.querySelector('script[nonce]').nonce));
   assert.deepEqual(result.negative, { nonced: true, inline: false, wrong: false, handler: false, eval: false });
   result.injectedExternal = await injectedExternal(page); assert.equal(result.injectedExternal, false);

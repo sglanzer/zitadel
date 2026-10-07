@@ -49,11 +49,11 @@ if [[ $mode == dependencies ]]; then
   bound
 fi
 pnpm nx run --nxBail @zitadel/login:build --parallel=2 --skip-nx-cache
-pnpm --filter @zitadel/login exec vitest run src/lib/csp.test.ts src/proxy.test.ts --maxWorkers=2
 bound
 npm install --prefix "$workspace/browser" --ignore-scripts --no-audit --no-fund playwright@1.55.0
 export PLAYWRIGHT_BROWSERS_PATH="$workspace/browsers"
 "$workspace/browser/node_modules/.bin/playwright" install --with-deps chromium
+CSP_TEST_PLAYWRIGHT_PACKAGE="$workspace/browser/package.json" pnpm --filter @zitadel/login exec vitest run src/lib/csp.test.ts src/proxy.test.ts src/lib/server/flow-initiation.test.ts --maxWorkers=2 --silent=false > "$reports/supplier-tests.txt" 2>&1
 cp -r apps/login/.next/static apps/login/.next/standalone/apps/login/.next/
 cp -r apps/login/public apps/login/.next/standalone/apps/login/
 strict=true

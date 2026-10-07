@@ -121,10 +121,22 @@ try {
     return rows;
   }, [result.staticChunk, '/ui/v2/login/grid-light.svg']);
   assert(result.assets.every(a => a.status === 200 && !/private|no-store/.test(a.cache || '')));
+  result.rendering = await cachePage.evaluate(async () => {
+    const rows = [];
+    for (const headers of [{ Accept: '' }, { RSC: '1', Accept: 'text/x-component' }]) {
+      const response = await fetch('/ui/v2/login/logout/done', { headers, redirect: 'error' });
+      rows.push({ status: response.status, type: response.headers.get('content-type'), cache: response.headers.get('cache-control') });
+    }
+    return rows;
+  });
+  assert(result.rendering.every(r => r.status === 200 && r.cache.includes('private') && r.cache.includes('no-store')));
   await cachePage.close();
   await document('/ui/v2/login/favicon/owned-missing.svg');
-  await document('/ui/v2/login/_next/static/owned-missing.js');
-
+  result.staticMissing = await page.evaluate(async () => {
+    const r = await fetch('/ui/v2/login/_next/static/owned-missing.js', { redirect: 'error' });
+    return { status: r.status, empty: (await r.text()) === '', cache: r.headers.get('cache-control') };
+  });
+  assert.deepEqual(result.staticMissing, { status: 404, empty: true, cache: 'private, no-store' });
   result.negative = await controls(page, await page.evaluate(() => document.querySelector('script[nonce]').nonce));
   assert.deepEqual(result.negative, { nonced: true, inline: false, wrong: false, handler: false, eval: false });
   result.injectedExternal = await injectedExternal(page); assert.equal(result.injectedExternal, false);

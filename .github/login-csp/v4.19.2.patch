@@ -380,13 +380,16 @@ index b1d752c..9b92d23 100644
      logger.error("SAML createResponse failed:", { error });
 diff --git a/apps/login/src/proxy.test.ts b/apps/login/src/proxy.test.ts
 new file mode 100644
-index 0000000..c1331c0
+index 0000000..0a2f6b6
 --- /dev/null
 +++ b/apps/login/src/proxy.test.ts
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,111 @@
 +// @vitest-environment node
++import { statSync } from "node:fs";
 +import { NextRequest } from "next/server";
 +import { afterEach, describe, expect, test, vi } from "vitest";
++
++vi.mock("node:fs", () => ({ statSync: vi.fn(() => ({ isFile: () => true })) }));
 +
 +vi.mock("./lib/service-url", () => ({
 +  getServiceConfig: () => ({ serviceConfig: { baseUrl: "https://idp.example.com" } }),
@@ -400,6 +403,7 @@ index 0000000..c1331c0
 +
 +afterEach(() => {
 +  vi.unstubAllEnvs();
++  vi.mocked(statSync).mockReturnValue({ isFile: () => true } as any);
 +  vi.mocked(getIframeOrigins).mockResolvedValue(null);
 +});
 +
@@ -454,6 +458,20 @@ index 0000000..c1331c0
 +    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
 +  });
 +
++  test.each(["missing", "directory", "unreadable"])("refuses the synthetic static error shell: %s", async (kind) => {
++    vi.stubEnv("CSP_NONCE_ENABLED", "true");
++    if (kind === "missing") vi.mocked(statSync).mockReturnValue(undefined as any);
++    if (kind === "directory") vi.mocked(statSync).mockReturnValue({ isFile: () => false } as any);
++    if (kind === "unreadable")
++      vi.mocked(statSync).mockImplementationOnce(() => {
++        throw new Error("unreadable fixture");
++      });
++    const response = await proxy(new NextRequest("https://login.example.com/_next/static/owned.js"));
++    expect(response.status).toBe(404);
++    expect(await response.text()).toBe("");
++    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
++  });
++
 +  test("strict policy also survives settings lookup failure", async () => {
 +    vi.stubEnv("CSP_NONCE_ENABLED", "true");
 +    vi.stubEnv("CSP_FETCH_ENABLED", "true");
@@ -478,16 +496,18 @@ index 0000000..c1331c0
 +  });
 +});
 diff --git a/apps/login/src/proxy.ts b/apps/login/src/proxy.ts
-index 6fa0576..743f778 100644
+index 6fa0576..5b544cd 100644
 --- a/apps/login/src/proxy.ts
 +++ b/apps/login/src/proxy.ts
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,7 @@
  import { NextRequest, NextResponse } from "next/server";
 +import { randomBytes } from "node:crypto";
++import { statSync } from "node:fs";
++import { resolve } from "node:path";
  import { buildCSP } from "./lib/csp";
  import { applyCustomHeaders } from "./lib/custom-headers";
  import { createLogger } from "./lib/logger";
-@@ -14,6 +15,9 @@ export const config = {
+@@ -14,6 +17,9 @@ export const config = {
  export async function proxy(request: NextRequest) {
    // Add the original URL as a header to all requests
    const requestHeaders = new Headers(request.headers);
@@ -497,7 +517,7 @@ index 6fa0576..743f778 100644
  
    // Extract "organization" search param from the URL and set it as a header if available
    const organization = request.nextUrl.searchParams.get("organization");
-@@ -29,6 +33,12 @@ export async function proxy(request: NextRequest) {
+@@ -29,6 +35,24 @@ export async function proxy(request: NextRequest) {
      return NextResponse.next({ request: { headers: requestHeaders } });
    }
  
@@ -507,10 +527,22 @@ index 6fa0576..743f778 100644
 +    return new NextResponse(null, { status: 404, headers: { "Cache-Control": "private, no-store" } });
 +  }
 +
++  // Next's missing static-chunk error uses a prerendered shell, bypassing the
++  // dynamic root layout. Keep real chunk caching but never serve that shell.
++  if (nonce && request.nextUrl.pathname.startsWith("/_next/static/")) {
++    const root = resolve(process.cwd(), ".next/static");
++    const file = resolve(root, request.nextUrl.pathname.slice("/_next/static/".length));
++    let found = false;
++    try {
++      found = file.startsWith(root + "/") && !!statSync(file, { throwIfNoEntry: false })?.isFile();
++    } catch {}
++    if (!found) return new NextResponse(null, { status: 404, headers: { "Cache-Control": "private, no-store" } });
++  }
++
    const { serviceConfig } = getServiceConfig(request.headers);
    const { baseUrl, publicHost, instanceHost } = serviceConfig;
  
-@@ -42,7 +52,7 @@ export async function proxy(request: NextRequest) {
+@@ -42,7 +66,7 @@ export async function proxy(request: NextRequest) {
      try {
        const iframeOrigins = await getIframeOrigins(baseUrl, instanceHost, publicHost);
  
@@ -519,7 +551,7 @@ index 6fa0576..743f778 100644
  
        if (!iframeOrigins) {
          responseHeaders.set("X-Frame-Options", "deny");
-@@ -51,11 +61,11 @@ export async function proxy(request: NextRequest) {
+@@ -51,11 +75,11 @@ export async function proxy(request: NextRequest) {
        logger.error("Failed to load security settings for CSP, using default CSP", {
          error: err instanceof Error ? err.message : String(err),
        });
@@ -533,7 +565,7 @@ index 6fa0576..743f778 100644
      responseHeaders.set("X-Frame-Options", "deny");
    }
  
-@@ -64,6 +74,29 @@ export async function proxy(request: NextRequest) {
+@@ -64,6 +88,29 @@ export async function proxy(request: NextRequest) {
    const isMatched = proxyPaths.some((prefix) => request.nextUrl.pathname.startsWith(prefix));
  
    if (!isMatched) {
